@@ -3,8 +3,10 @@ import unittest
 from pydantic import BaseModel
 
 from v6_federated_core import (
+    ConfigError,
     MethodRegistry,
     MethodSpec,
+    ResultEnvelope,
     dispatch_registered_method,
     dispatch_task_input,
     to_v6_result,
@@ -33,51 +35,49 @@ class AdaptersTestCase(unittest.TestCase):
         )
         self.registry = MethodRegistry([self.spec])
 
-    def test_dispatch_registered_method_returns_success_envelope(self) -> None:
+    def test_dispatch_registered_method_returns_success_payload(self) -> None:
         result = dispatch_registered_method(
             self.registry,
             "double",
             {"value": 3},
         )
 
-        self.assertTrue(result.ok)
-        self.assertEqual(result.payload, {"doubled": 6})
+        self.assertEqual(result, {"doubled": 6})
 
     def test_dispatch_task_input_validates_wrapper_shape(self) -> None:
-        result = dispatch_task_input(
-            self.registry,
-            {"kwargs": {"value": 3}},
-        )
-
-        self.assertFalse(result.ok)
-        self.assertEqual(result.errors[0].category.value, "config")
+        with self.assertRaises(ConfigError):
+            dispatch_task_input(
+                self.registry,
+                {"kwargs": {"value": 3}},
+            )
 
     def test_dispatch_task_input_validates_kwargs_type(self) -> None:
-        result = dispatch_task_input(
-            self.registry,
-            {"method": "double", "kwargs": "bad"},
-        )
+        with self.assertRaises(ConfigError):
+            dispatch_task_input(
+                self.registry,
+                {"method": "double", "kwargs": "bad"},
+            )
 
-        self.assertFalse(result.ok)
-        self.assertEqual(result.meta["method"], "double")
-
-    def test_to_v6_result_unwraps_success_payload(self) -> None:
-        envelope = dispatch_task_input(
+    def test_to_v6_result_passthrough_dict(self) -> None:
+        payload = dispatch_task_input(
             self.registry,
             {"method": "double", "kwargs": {"value": 4}},
         )
 
-        result = to_v6_result(envelope)
+        result = to_v6_result(payload)
 
         self.assertEqual(result, {"doubled": 8})
 
-    def test_to_v6_result_keeps_failure_envelope(self) -> None:
-        envelope = dispatch_task_input(
-            self.registry,
-            {"method": "missing", "kwargs": {}},
+    def test_to_v6_result_raises_on_failure_envelope(self) -> None:
+        envelope = ResultEnvelope(
+            ok=False,
+            errors=[
+                {
+                    "category": "config",
+                    "message": "bad input",
+                    "owner": "caller",
+                }
+            ],
         )
-
-        result = to_v6_result(envelope)
-
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["errors"][0]["category"], "config")
+        with self.assertRaises(ConfigError):
+            to_v6_result(envelope)

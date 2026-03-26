@@ -1,19 +1,10 @@
-import traceback
 from typing import Any, Dict, Iterable, Optional
 
 from pydantic import ValidationError
 
-from .errors import FederatedCoreError, PrivacyPolicyError
+from .errors import ConfigError, DataContractError, FederatedCoreError, PrivacyPolicyError
 from .policy import PolicyContext, PrivacyPolicy, evaluate_policies
-from .types import FailureCategory, FailureDetail, MethodContext, MethodSpec, ResultEnvelope
-
-
-def _validation_failure(message: str, owner: str = "caller") -> FailureDetail:
-    return FailureDetail(
-        category=FailureCategory.CONFIG,
-        message=message,
-        owner=owner,
-    )
+from .types import FailureDetail, MethodContext, MethodSpec
 
 
 def invoke_method(
@@ -23,18 +14,26 @@ def invoke_method(
     context: Optional[MethodContext] = None,
     policies: Optional[Iterable[PrivacyPolicy]] = None,
     policy_context: Optional[PolicyContext] = None,
-) -> ResultEnvelope:
+) -> Dict[str, Any]:
     method_context = context or MethodContext(method=spec.name)
+
+    def _record_error(detail: FailureDetail) -> None:
+        errors = method_context.meta.setdefault("errors", [])
+        if isinstance(errors, list):
+            errors.append(detail.model_dump())
 
     try:
         validated_input = spec.validate_input(raw_input)
     except ValidationError as exc:
-        return ResultEnvelope.failure(
-            _validation_failure(
-                f"Input validation failed for '{spec.name}': {exc.__class__.__name__}",
-            ),
-            meta={"method": spec.name},
+        error = ConfigError(
+            f"Input validation failed for '{spec.name}'",
+            meta={
+                "method": spec.name,
+                "validation_errors": exc.errors(),
+            },
         )
+        _record_error(error.to_failure_detail())
+        raise error from exc
 
     if policies:
         effective_policy_context = policy_context or PolicyContext(
@@ -44,45 +43,58 @@ def invoke_method(
         )
         decision = evaluate_policies(policies, effective_policy_context)
         if not decision.allowed:
-            return ResultEnvelope.failure(
-                PrivacyPolicyError(
-                    decision.reason or f"Privacy policy blocked '{spec.name}'"
-                ).to_failure_detail(),
-                warnings=decision.warnings,
-                meta={"method": spec.name},
+            error = PrivacyPolicyError(
+                decision.reason or f"Privacy policy blocked '{spec.name}'",
+                meta={
+                    "method": spec.name,
+                    "warnings": decision.warnings,
+                },
             )
+            _record_error(error.to_failure_detail())
+            raise error
 
     try:
         raw_output = spec.handler(validated_input, method_context)
-        validated_output = spec.validate_output(raw_output)
     except ValidationError as exc:
-        return ResultEnvelope.failure(
-            _validation_failure(
-                f"Output validation failed for '{spec.name}': {exc.__class__.__name__}",
-                owner="algorithm",
-            ),
-            meta={"method": spec.name},
-        )
-    except FederatedCoreError as exc:
-        return ResultEnvelope.failure(
-            exc.to_failure_detail(),
-            meta={"method": spec.name},
-        )
-    except Exception as exc:
-        failure_meta = {
-            "exception_type": exc.__class__.__name__,
-            "exception_message": str(exc),
-            "traceback": traceback.format_exc(),
-        }
-        return ResultEnvelope.failure(
+        # Keep the original validation traceback from the handler.
+        _record_error(
             FederatedCoreError(
                 f"Unhandled execution failure in '{spec.name}'",
-                meta=failure_meta,
-            ).to_failure_detail(),
-            meta={"method": spec.name},
+                meta={
+                    "method": spec.name,
+                    "exception_type": exc.__class__.__name__,
+                    "exception_message": str(exc),
+                },
+            ).to_failure_detail()
         )
+        raise
+    except FederatedCoreError as exc:
+        _record_error(exc.to_failure_detail())
+        raise
+    except Exception as exc:
+        _record_error(
+            FederatedCoreError(
+                f"Unhandled execution failure in '{spec.name}'",
+                meta={
+                    "method": spec.name,
+                    "exception_type": exc.__class__.__name__,
+                    "exception_message": str(exc),
+                },
+            ).to_failure_detail()
+        )
+        raise
 
-    return ResultEnvelope.success(
-        payload=validated_output.model_dump(),
-        meta={"method": spec.name},
-    )
+    try:
+        validated_output = spec.validate_output(raw_output)
+    except ValidationError as exc:
+        error = DataContractError(
+            f"Output validation failed for '{spec.name}'",
+            meta={
+                "method": spec.name,
+                "validation_errors": exc.errors(),
+            },
+        )
+        _record_error(error.to_failure_detail())
+        raise error from exc
+
+    return validated_output.model_dump()

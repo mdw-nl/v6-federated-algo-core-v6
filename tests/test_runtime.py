@@ -3,11 +3,14 @@ import unittest
 from pydantic import BaseModel
 
 from v6_federated_core import (
+    ConfigError,
+    DataContractError,
     MethodContext,
     MethodSpec,
     MinOrganizationsPolicy,
     PolicyContext,
     PolicyScope,
+    PrivacyPolicyError,
     invoke_method,
 )
 
@@ -43,10 +46,20 @@ class RuntimeTestCase(unittest.TestCase):
 
         result = invoke_method(spec, {"value": 5})
 
-        self.assertTrue(result.ok)
-        self.assertEqual(result.payload, {"doubled": 10})
+        self.assertEqual(result, {"doubled": 10})
 
-    def test_invoke_method_returns_failure_on_output_validation(self) -> None:
+    def test_invoke_method_raises_on_input_validation(self) -> None:
+        spec = MethodSpec(
+            name="double",
+            input_model=DemoInput,
+            output_model=DemoOutput,
+            handler=_double_handler,
+        )
+
+        with self.assertRaises(ConfigError):
+            invoke_method(spec, {"value": "oops"})
+
+    def test_invoke_method_raises_on_output_validation(self) -> None:
         spec = MethodSpec(
             name="double",
             input_model=DemoInput,
@@ -54,12 +67,10 @@ class RuntimeTestCase(unittest.TestCase):
             handler=_bad_output_handler,
         )
 
-        result = invoke_method(spec, {"value": 5})
+        with self.assertRaises(DataContractError):
+            invoke_method(spec, {"value": 5})
 
-        self.assertFalse(result.ok)
-        self.assertEqual(result.errors[0].category.value, "config")
-
-    def test_invoke_method_applies_privacy_policy(self) -> None:
+    def test_invoke_method_raises_on_privacy_policy(self) -> None:
         spec = MethodSpec(
             name="double",
             input_model=DemoInput,
@@ -68,22 +79,20 @@ class RuntimeTestCase(unittest.TestCase):
         )
         context = MethodContext(method="double", organization_ids=[1, 2])
 
-        result = invoke_method(
-            spec,
-            {"value": 5},
-            context=context,
-            policies=[MinOrganizationsPolicy(minimum=3)],
-            policy_context=PolicyContext(
-                scope=PolicyScope.ELIGIBILITY,
-                method="double",
-                organization_count=2,
-            ),
-        )
+        with self.assertRaises(PrivacyPolicyError):
+            invoke_method(
+                spec,
+                {"value": 5},
+                context=context,
+                policies=[MinOrganizationsPolicy(minimum=3)],
+                policy_context=PolicyContext(
+                    scope=PolicyScope.ELIGIBILITY,
+                    method="double",
+                    organization_count=2,
+                ),
+            )
 
-        self.assertFalse(result.ok)
-        self.assertEqual(result.errors[0].category.value, "privacy")
-
-    def test_invoke_method_includes_traceback_on_unhandled_error(self) -> None:
+    def test_invoke_method_preserves_unhandled_error(self) -> None:
         spec = MethodSpec(
             name="double",
             input_model=DemoInput,
@@ -91,17 +100,23 @@ class RuntimeTestCase(unittest.TestCase):
             handler=_crash_handler,
         )
 
-        result = invoke_method(spec, {"value": 5})
+        with self.assertRaises(RuntimeError) as exc_info:
+            invoke_method(spec, {"value": 5})
 
-        self.assertFalse(result.ok)
-        self.assertEqual(result.errors[0].category.value, "execution")
-        self.assertEqual(
-            result.errors[0].message,
-            "Unhandled execution failure in 'double'",
+        self.assertEqual(str(exc_info.exception), "boom")
+
+    def test_invoke_method_collects_error_details_in_context(self) -> None:
+        spec = MethodSpec(
+            name="double",
+            input_model=DemoInput,
+            output_model=DemoOutput,
+            handler=_crash_handler,
         )
-        self.assertEqual(result.errors[0].meta.get("exception_type"), "RuntimeError")
-        self.assertEqual(result.errors[0].meta.get("exception_message"), "boom")
-        self.assertIn(
-            "Traceback (most recent call last)",
-            result.errors[0].meta.get("traceback", ""),
-        )
+        context = MethodContext(method="double")
+
+        with self.assertRaises(RuntimeError):
+            invoke_method(spec, {"value": 5}, context=context)
+
+        collected = context.meta.get("errors", [])
+        self.assertTrue(collected)
+        self.assertEqual(collected[0]["category"], "execution")

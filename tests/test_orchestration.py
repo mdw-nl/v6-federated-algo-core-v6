@@ -2,7 +2,17 @@ import unittest
 
 from pydantic import BaseModel
 
-from v6_federated_core import ConfigError, PartialFailureError, ResultEnvelope, TaskRunner, WorkflowStepSpec
+from v6_federated_core import (
+    ConfigError,
+    DataContractError,
+    FederatedCoreError,
+    InfrastructureError,
+    PartialFailureError,
+    ResultEnvelope,
+    TaskRunner,
+    WorkflowStepSpec,
+    parse_result_envelope,
+)
 
 
 class StepInput(BaseModel):
@@ -108,6 +118,24 @@ class TaskRunnerTestCase(unittest.TestCase):
         with self.assertRaises(PartialFailureError):
             runner.collect(self.step, 1)
 
+    def test_collect_raises_on_malformed_failure_envelope(self) -> None:
+        client = FakeClient(
+            results=[
+                {
+                    "ok": False,
+                    "errors": [{"message": "node failed without category"}],
+                    "meta": {"method": "linear.partial"},
+                }
+            ]
+        )
+        runner = TaskRunner(client)
+
+        with self.assertRaises(FederatedCoreError) as exc_info:
+            runner.collect(self.step, 1)
+
+        self.assertEqual(str(exc_info.exception), "node failed without category")
+        self.assertEqual(exc_info.exception.meta.get("errors", [{}])[0].get("category"), "execution")
+
     def test_dispatch_rejects_empty_organizations(self) -> None:
         runner = TaskRunner(FakeClient(results=[]))
 
@@ -129,5 +157,26 @@ class TaskRunnerTestCase(unittest.TestCase):
         client = FakeClient(results=[{"wrong": 1}])
         runner = TaskRunner(client)
 
-        with self.assertRaises(PartialFailureError):
+        with self.assertRaises(DataContractError):
             runner.collect(self.step, 1)
+
+    def test_collect_raises_on_non_list_payload(self) -> None:
+        client = FakeClient(results={"wrong": 1})
+        runner = TaskRunner(client)
+
+        with self.assertRaises(InfrastructureError):
+            runner.collect(self.step, 1)
+
+    def test_parse_result_envelope_coerces_schema_drift(self) -> None:
+        envelope = parse_result_envelope(
+            {
+                "ok": False,
+                "errors": [{"message": "upstream failure"}],
+            }
+        )
+
+        self.assertIsNotNone(envelope)
+        assert envelope is not None
+        self.assertFalse(envelope.ok)
+        self.assertEqual(envelope.errors[0].category.value, "execution")
+        self.assertEqual(envelope.errors[0].message, "upstream failure")

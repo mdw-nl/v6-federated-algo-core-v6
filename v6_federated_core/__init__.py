@@ -7,7 +7,7 @@ from .errors import (
     PartialFailureError,
     PrivacyPolicyError,
 )
-from .orchestration import TaskRunner, WorkflowStepSpec
+from .orchestration import TaskRunner, WorkflowStepSpec, error_from_envelope, parse_result_envelope
 from .policy import (
     MinOrganizationsPolicy,
     MinRowsPolicy,
@@ -45,6 +45,8 @@ __all__ = [
     "PolicyScope",
     "PrivacyPolicy",
     "PrivacyPolicyError",
+    "error_from_envelope",
+    "parse_result_envelope",
     "ResultEnvelope",
     "ReviewChecklistItem",
     "TaskRunner",
