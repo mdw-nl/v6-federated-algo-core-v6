@@ -1,3 +1,4 @@
+import traceback
 from typing import Any, Dict, Iterable, Optional
 
 from pydantic import ValidationError
@@ -67,10 +68,16 @@ def invoke_method(
             exc.to_failure_detail(),
             meta={"method": spec.name},
         )
-    except Exception:
+    except Exception as exc:
+        failure_meta = {
+            "exception_type": exc.__class__.__name__,
+            "exception_message": str(exc),
+            "traceback": traceback.format_exc(),
+        }
         return ResultEnvelope.failure(
             FederatedCoreError(
-                f"Unhandled execution failure in '{spec.name}'"
+                f"Unhandled execution failure in '{spec.name}'",
+                meta=failure_meta,
             ).to_failure_detail(),
             meta={"method": spec.name},
         )
